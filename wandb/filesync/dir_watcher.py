@@ -3,6 +3,7 @@ import os
 import fnmatch
 import queue
 import time
+from typing import MutableMapping
 
 from wandb import util
 import glob
@@ -155,6 +156,7 @@ class DirWatcher:
         self._file_count = 0
         self._dir = file_dir or settings.files_dir
         self._settings = settings
+        self._srp_user_file_policies: MutableMapping[str, str] = {}
         self._user_file_policies = {"end": set(), "live": set(), "now": set()}
         self._file_pusher = file_pusher
         self._file_event_handlers = {}
@@ -173,6 +175,21 @@ class DirWatcher:
             return None
 
     def update_policy(self, path, policy):
+      if path == glob.escape(path):
+        self._srp_user_file_policies[path] = policy
+        src_path = os.path.join(self._dir, path)
+        save_name = os.path.relpath(src_path, self._dir)
+        feh = self._get_file_event_handler(src_path, save_name)
+        # handle the case where the policy changed
+        if feh.policy != policy:
+            try:
+                del self._file_event_handlers[save_name]
+            except KeyError:
+                # TODO: probably should do locking, but this handles moved files for now
+                pass
+            feh = self._get_file_event_handler(src_path, save_name)
+        feh.on_modified(force=True)
+      else:
         self._user_file_policies[policy].add(path)
         for src_path in glob.glob(os.path.join(self._dir, path)):
             save_name = os.path.relpath(src_path, self._dir)
@@ -254,6 +271,15 @@ class DirWatcher:
             # TODO: we can use PolicyIgnore if there are files we never want to sync
             if "tfevents" in save_name or "graph.pbtxt" in save_name:
                 self._file_event_handlers[save_name] = PolicyLive(
+                    file_path, save_name, self._api, self._file_pusher
+                )
+            elif save_name in self._srp_user_file_policies:
+                Handler = {
+                    'live': PolicyLive,
+                    'end': PolicyEnd,
+                    'now': PolicyNow,
+                }[self._srp_user_file_policies[save_name]]
+                self._file_event_handlers[save_name] = Handler(
                     file_path, save_name, self._api, self._file_pusher
                 )
             else:
