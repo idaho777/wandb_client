@@ -168,7 +168,7 @@ class DirWatcher:
             "live": set(),
             "now": set(),
         }
-        self._path_file_policies: MutableMapping[str, Type[FileEventHandler]] = []
+        self._path_file_policies: MutableMapping[str, Type[FileEventHandler]] = {}
         self._file_pusher = file_pusher
         self._file_event_handlers = {}
         self._file_observer = wd_polling.PollingObserver()
