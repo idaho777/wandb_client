@@ -3,7 +3,7 @@ import os
 import fnmatch
 import queue
 import time
-from typing import MutableMapping
+from typing import MutableMapping, MutableSequence, MutableSet, Tuple, Type
 
 from wandb import util
 import glob
@@ -150,14 +150,21 @@ class PolicyLive(FileEventHandler):
         return "live"
 
 
+HANDLER_TYPES_BY_POLICY_NAME = {
+    "now": PolicyNow,
+    "end": PolicyEnd,
+    "live": PolicyLive,
+}
+
+
 class DirWatcher:
     def __init__(self, settings, api, file_pusher, file_dir=None):
         self._api = api
         self._file_count = 0
         self._dir = file_dir or settings.files_dir
         self._settings = settings
-        self._srp_user_file_policies: MutableMapping[str, str] = {}
-        self._user_file_policies = {"end": set(), "live": set(), "now": set()}
+        self._glob_file_policies: MutableMapping[str, MutableSet[str]] = {"end": set(), "live": set(), "now": set()}
+        self._path_file_policies: MutableMapping[str, Type[FileEventHandler]] = []
         self._file_pusher = file_pusher
         self._file_event_handlers = {}
         self._file_observer = wd_polling.PollingObserver()
@@ -176,8 +183,13 @@ class DirWatcher:
 
     def update_policy(self, path, policy):
         if path == glob.escape(path):
-            self._srp_user_file_policies[path] = policy
-            src_path = os.path.join(self._dir, path)
+            self._path_file_policies[path] = HANDLER_TYPES_BY_POLICY_NAME[policy]
+            src_paths = [os.path.join(self._dir, path)]
+        else:
+            self._glob_file_policies[policy].add(path)
+            src_paths = glob.glob(os.path.join(self._dir, path))
+
+        for src_path in src_paths:
             save_name = os.path.relpath(src_path, self._dir)
             feh = self._get_file_event_handler(src_path, save_name)
             # handle the case where the policy changed
@@ -189,20 +201,6 @@ class DirWatcher:
                     pass
                 feh = self._get_file_event_handler(src_path, save_name)
             feh.on_modified(force=True)
-        else:
-            self._user_file_policies[policy].add(path)
-            for src_path in glob.glob(os.path.join(self._dir, path)):
-                save_name = os.path.relpath(src_path, self._dir)
-                feh = self._get_file_event_handler(src_path, save_name)
-                # handle the case where the policy changed
-                if feh.policy != policy:
-                    try:
-                        del self._file_event_handlers[save_name]
-                    except KeyError:
-                        # TODO: probably should do locking, but this handles moved files for now
-                        pass
-                    feh = self._get_file_event_handler(src_path, save_name)
-                feh.on_modified(force=True)
 
     def _per_file_event_handler(self):
         """Create a Watchdog file event handler that does different things for every file"""
@@ -270,21 +268,12 @@ class DirWatcher:
         if save_name not in self._file_event_handlers:
             # TODO: we can use PolicyIgnore if there are files we never want to sync
             if "tfevents" in save_name or "graph.pbtxt" in save_name:
-                self._file_event_handlers[save_name] = PolicyLive(
-                    file_path, save_name, self._api, self._file_pusher
-                )
-            elif save_name in self._srp_user_file_policies:
-                Handler = {
-                    "live": PolicyLive,
-                    "end": PolicyEnd,
-                    "now": PolicyNow,
-                }[self._srp_user_file_policies[save_name]]
-                self._file_event_handlers[save_name] = Handler(
-                    file_path, save_name, self._api, self._file_pusher
-                )
+                Handler = PolicyLive
+            elif save_name in self._path_file_policies:
+                Handler = self._path_file_policies[save_name]
             else:
                 Handler = PolicyEnd
-                for policy, globs in self._user_file_policies.items():
+                for policy, globs in self._glob_file_policies.items():
                     if policy == "end":
                         continue
                     # Convert set to list to avoid RuntimeError's
@@ -292,13 +281,10 @@ class DirWatcher:
                     for g in list(globs):
                         paths = glob.glob(os.path.join(self._dir, g))
                         if any(save_name in p for p in paths):
-                            if policy == "live":
-                                Handler = PolicyLive
-                            elif policy == "now":
-                                Handler = PolicyNow
-                self._file_event_handlers[save_name] = Handler(
-                    file_path, save_name, self._api, self._file_pusher
-                )
+                            Handler = HANDLER_TYPES_BY_POLICY_NAME[policy]
+            self._file_event_handlers[save_name] = Handler(
+                file_path, save_name, self._api, self._file_pusher
+            )
         return self._file_event_handlers[save_name]
 
     def finish(self):
