@@ -163,7 +163,11 @@ class DirWatcher:
         self._file_count = 0
         self._dir = file_dir or settings.files_dir
         self._settings = settings
-        self._glob_file_policies: MutableMapping[str, MutableSet[str]] = {"end": set(), "live": set(), "now": set()}
+        self._glob_file_policies: MutableMapping[str, MutableSet[str]] = {
+            "end": set(),
+            "live": set(),
+            "now": set(),
+        }
         self._path_file_policies: MutableMapping[str, Type[FileEventHandler]] = []
         self._file_pusher = file_pusher
         self._file_event_handlers = {}
